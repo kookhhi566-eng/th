@@ -1,0 +1,415 @@
+diff --git a/Telegram/Resources/langs/lang.strings b/Telegram/Resources/langs/lang.strings
+index c0c8571..1e08a19 100644
+--- a/Telegram/Resources/langs/lang.strings
++++ b/Telegram/Resources/langs/lang.strings
+@@ -405,6 +405,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ "lng_edit_caption_voice" = "Sorry, you can't edit messages when you have an unsent voice message.";
+ 
+ "lng_intro_about" = "Welcome to the official Telegram Desktop app.\nIt's fast and secure.";
++"lng_hooktelegram_intro_about" = "Your chats, your workspace.\nSign in to get started.";
+ "lng_start_msgs" = "Start Messaging";
+ 
+ "lng_intro_next" = "Next";
+@@ -5369,6 +5370,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ "lng_context_save_music_folder" = "... Downloads";
+ "lng_context_save_music_about" = "Choose where you want this audio to be saved.";
+ "lng_context_copy_text" = "Copy Text";
++"lng_context_copy_clean_link" = "Copy Link Without Tracking";
++"lng_context_send_text_copy" = "Send a Copy of the Text";
+ "lng_context_open_gif" = "Open GIF";
+ "lng_context_save_gif" = "Add to GIFs";
+ "lng_context_delete_gif" = "Delete";
+diff --git a/Telegram/SourceFiles/boxes/share_box.cpp b/Telegram/SourceFiles/boxes/share_box.cpp
+index f4787db..5c487d6 100644
+--- a/Telegram/SourceFiles/boxes/share_box.cpp
++++ b/Telegram/SourceFiles/boxes/share_box.cpp
+@@ -47,6 +47,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "data/business/data_shortcut_messages.h"
+ #include "data/data_channel.h"
+ #include "data/data_chat_filters.h"
++#include "data/data_chat_participant_status.h"
+ #include "data/data_community.h"
+ #include "data/data_game.h"
+ #include "data/data_histories.h"
+@@ -271,6 +272,11 @@ void ShareBox::prepareCommentField() {
+ 		});
+ 	}
+ 	field->setSubmitSettings(Core::App().settings().sendSubmitWay());
++	if (!_descriptor.initialText.empty()) {
++		field->setTextWithTags(
++			base::take(_descriptor.initialText),
++			Ui::InputField::HistoryAction::Clear);
++	}
+ 
+ 	field->changes() | rpl::on_next([=] {
+ 		if (!field->getLastText().isEmpty()) {
+@@ -2323,6 +2329,62 @@ void FastShareLink(
+ 		anim::type::normal);
+ }
+ 
++void FastShareTextCopy(
++		std::shared_ptr<Main::SessionShow> show,
++		TextWithTags text) {
++	const auto box = std::make_shared<base::weak_qptr<Ui::BoxContent>>();
++	const auto sending = std::make_shared<bool>();
++	const auto self = show->session().data().history(show->session().user());
++	const auto countMessages = [=](const TextWithTags &comment) {
++		return ComputeSendingMessagesCount(self, { .text = &comment });
++	};
++	const auto submit = [=](
++			std::vector<not_null<Data::Thread*>> &&threads,
++			Fn<bool()> checkPaid,
++			TextWithTags &&comment,
++			Api::SendOptions options,
++			Data::ForwardOptions) {
++		if (*sending
++			|| !*box
++			|| threads.empty()
++			|| comment.text.trimmed().isEmpty()) {
++			return;
++		}
++		const auto error = GetErrorForSending(threads, {
++			.text = &comment,
++		});
++		if (error.error) {
++			(*box)->getDelegate()->show(
++				MakeSendErrorBox(error, threads.size() > 1));
++			return;
++		} else if (!checkPaid()) {
++			return;
++		}
++		*sending = true;
++		auto &api = show->session().api();
++		for (const auto &thread : threads) {
++			auto message = Api::MessageToSend(Api::SendAction(thread, options));
++			message.textWithTags = comment;
++			message.action.clearDraft = false;
++			api.sendMessage(std::move(message));
++		}
++		if (*box) {
++			(*box)->closeBox();
++		}
++	};
++	*box = show->show(Box<ShareBox>(ShareBox::Descriptor{
++		.session = &show->session(),
++		.countMessagesCallback = countMessages,
++		.submitCallback = submit,
++		.filterCallback = [](not_null<Data::Thread*> thread) {
++			return Data::CanSendTexts(thread);
++		},
++		.titleOverride = tr::lng_context_send_text_copy(),
++		.moneyRestrictionError = ShareMessageMoneyRestrictionError(),
++		.initialText = std::move(text),
++	}));
++}
++
+ base::weak_qptr<Ui::BoxContent> FastShareImage(
+ 		std::shared_ptr<Main::SessionShow> show,
+ 		QImage image,
+diff --git a/Telegram/SourceFiles/boxes/share_box.h b/Telegram/SourceFiles/boxes/share_box.h
+index 33512f8..ae46ae1 100644
+--- a/Telegram/SourceFiles/boxes/share_box.h
++++ b/Telegram/SourceFiles/boxes/share_box.h
+@@ -13,6 +13,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "ui/chat/forward_options_box.h"
+ #include "ui/effects/animations.h"
+ #include "ui/effects/round_checkbox.h"
++#include "ui/text/text_entity.h"
+ #include "mtproto/sender.h"
+ 
+ class History;
+@@ -90,6 +91,9 @@ void FastShareLink(
+ 	std::shared_ptr<Main::SessionShow> show,
+ 	const QString &url,
+ 	ShareBoxStyleOverrides st = {});
++void FastShareTextCopy(
++	std::shared_ptr<Main::SessionShow> show,
++	TextWithTags text);
+ [[nodiscard]] base::weak_qptr<Ui::BoxContent> FastShareImage(
+ 	std::shared_ptr<Main::SessionShow> show,
+ 	QImage image,
+@@ -140,6 +144,7 @@ public:
+ 		using MoneyRestrictionError = RecipientMoneyRestrictionError;
+ 		Fn<MoneyRestrictionError(
+ 			not_null<UserData*>)> moneyRestrictionError;
++		TextWithTags initialText;
+ 	};
+ 	ShareBox(QWidget*, Descriptor &&descriptor);
+ 
+diff --git a/Telegram/SourceFiles/history/history_inner_widget.cpp b/Telegram/SourceFiles/history/history_inner_widget.cpp
+index 78c2bf8..e8c8326 100644
+--- a/Telegram/SourceFiles/history/history_inner_widget.cpp
++++ b/Telegram/SourceFiles/history/history_inner_widget.cpp
+@@ -3717,6 +3717,10 @@ void HistoryInner::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
+ 				}
+ 				if (!item->isService() && view && actionText.isEmpty()) {
+ 					const auto hasRestriction = hasCopyRestriction(item);
++					if (hasRestriction && view->hasVisibleText()) {
++						HistoryView::AddProtectedChatTextActions(
++							_menu.get(), item, controller);
++					}
+ 					if (!hasRestriction
+ 						&& (view->hasVisibleText() || mediaHasTextForCopy)) {
+ 						_menu->addAction(
+diff --git a/Telegram/SourceFiles/history/view/history_view_context_menu.cpp b/Telegram/SourceFiles/history/view/history_view_context_menu.cpp
+index 5e6d2e1..53b8ef9 100644
+--- a/Telegram/SourceFiles/history/view/history_view_context_menu.cpp
++++ b/Telegram/SourceFiles/history/view/history_view_context_menu.cpp
+@@ -20,6 +20,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "api/api_toggling_media.h" // Api::ToggleFavedSticker
+ #include "base/qt/qt_key_modifiers.h"
+ #include "base/unixtime.h"
++#include "boxes/share_box.h"
++#include <QtCore/QUrlQuery>
+ #include "history/view/history_view_list_widget.h"
+ #include "history/view/controls/history_view_suggest_options.h"
+ #include "history/view/history_view_cursor_state.h"
+@@ -1434,6 +1436,27 @@ void AddCopyLinkAction(
+ 		action,
+ 		[=] { QGuiApplication::clipboard()->setText(text); },
+ 		&st::menuIconCopy);
++	const auto url = QUrl::fromEncoded(text.toUtf8(), QUrl::StrictMode);
++	if (!url.isValid() || (url.scheme() != u"https"_q && url.scheme() != u"http"_q)) {
++		return;
++	}
++	auto query = QUrlQuery(url);
++	const auto items = query.queryItems(QUrl::FullyEncoded);
++	auto changed = false;
++	for (const auto &item : items) {
++		const auto key = QUrl::fromPercentEncoding(item.first.toUtf8()).toLower();
++		if (key.startsWith(u"utm_"_q) || key == u"gclid"_q || key == u"fbclid"_q) {
++			query.removeAllQueryItems(item.first);
++			changed = true;
++		}
++	}
++	if (changed) {
++		auto clean = url;
++		clean.setQuery(query.isEmpty() ? QUrlQuery() : query);
++		menu->addAction(tr::lng_context_copy_clean_link(tr::now), [=] {
++			QGuiApplication::clipboard()->setText(clean.toString(QUrl::FullyEncoded));
++		}, &st::menuIconCopy);
++	}
+ }
+ 
+ void EditTagBox(
+@@ -1891,6 +1914,9 @@ void FillContextMenuItems(
+ 			AddDocumentActions(result, document, view->data(), list);
+ 		}
+ 		if (!link && (view->hasVisibleText() || mediaHasTextForCopy)) {
++			if (list->hasCopyRestriction(view->data()) && view->hasVisibleText()) {
++				AddProtectedChatTextActions(result, view->data(), list->controller());
++			}
+ 			if (!list->hasCopyRestriction(view->data())) {
+ 				const auto asGroup = (request.pointState != PointState::GroupPart);
+ 				result->addAction(tr::lng_context_copy_text(tr::now), [=] {
+@@ -2014,6 +2040,46 @@ base::unique_qptr<Ui::PopupMenu> FillContextMenu(
+ 	return result;
+ }
+ 
++void AddProtectedChatTextActions(
++		not_null<Ui::PopupMenu*> menu,
++		not_null<HistoryItem*> item,
++		not_null<Window::SessionController*> controller) {
++	const auto canCopy = [](not_null<HistoryItem*> item) {
++		const auto peer = item->history()->peer;
++		const auto media = item->media();
++		return (peer->isChat() || peer->isChannel())
++			&& (!peer->allowsForwarding() || item->forbidsForward())
++			&& item->isRegular()
++			&& !item->isService()
++			&& !IsAnchoredEphemeral(item)
++			&& item->paidType() == PaidPostType::None
++			&& (!media || (!media->ttlSeconds() && !media->invoice()))
++			&& !item->originalText().empty();
++	};
++	if (!canCopy(item)) {
++		return;
++	}
++	const auto owner = &item->history()->owner();
++	const auto id = item->fullId();
++	menu->addAction(tr::lng_context_copy_text(tr::now), [=] {
++		if (const auto current = owner->message(id);
++				current && canCopy(current)) {
++			TextUtilities::SetClipboardText(TextForMimeData::WithExpandedLinks(
++				current->originalText()));
++		}
++	}, &st::menuIconCopy);
++	menu->addAction(tr::lng_context_send_text_copy(tr::now), [=] {
++		if (const auto current = owner->message(id);
++				current && canCopy(current)) {
++			const auto &text = current->originalText();
++			FastShareTextCopy(controller->uiShow(), {
++				text.text,
++				TextUtilities::ConvertEntitiesToTextTags(text.entities),
++			});
++		}
++	}, &st::menuIconForward);
++}
++
+ void CopyPostLink(
+ 		not_null<Window::SessionController*> controller,
+ 		FullMsgId itemId,
+diff --git a/Telegram/SourceFiles/history/view/history_view_context_menu.h b/Telegram/SourceFiles/history/view/history_view_context_menu.h
+index a180144..45746cc 100644
+--- a/Telegram/SourceFiles/history/view/history_view_context_menu.h
++++ b/Telegram/SourceFiles/history/view/history_view_context_menu.h
+@@ -59,6 +59,11 @@ base::unique_qptr<Ui::PopupMenu> FillContextMenu(
+ 	not_null<ListWidget*> list,
+ 	const ContextMenuRequest &request);
+ 
++void AddProtectedChatTextActions(
++	not_null<Ui::PopupMenu*> menu,
++	not_null<HistoryItem*> item,
++	not_null<Window::SessionController*> controller);
++
+ void InsertPollHiddenResultsLabel(not_null<Ui::PopupMenu*> menu);
+ void InsertPollVoteRestrictionsLabel(
+ 	not_null<Ui::PopupMenu*> menu,
+diff --git a/Telegram/SourceFiles/intro/intro.style b/Telegram/SourceFiles/intro/intro.style
+index 959f453..890fa40 100644
+--- a/Telegram/SourceFiles/intro/intro.style
++++ b/Telegram/SourceFiles/intro/intro.style
+@@ -32,7 +32,7 @@ introCoverTitle: FlatLabel(defaultFlatLabel) {
+ 	textFg: introTitleFg;
+ 	align: align(center);
+ 	style: TextStyle(defaultTextStyle) {
+-		font: font(22px semibold);
++		font: font(24px semibold);
+ 	}
+ }
+ introCoverTitleTop: 136px;
+@@ -78,9 +78,9 @@ introCoverDuration: 200;
+ 
+ introNextButton: RoundButton(defaultActiveButton) {
+ 	width: 300px;
+-	height: 42px;
+-	radius: 6px;
+-	textTop: 11px;
++	height: 46px;
++	radius: 12px;
++	textTop: 13px;
+ 	style: TextStyle(semiboldTextStyle) {
+ 		font: font(boxFontSize semibold);
+ 	}
+diff --git a/Telegram/SourceFiles/intro/intro_start.cpp b/Telegram/SourceFiles/intro/intro_start.cpp
+index d1b835a..8830a35 100644
+--- a/Telegram/SourceFiles/intro/intro_start.cpp
++++ b/Telegram/SourceFiles/intro/intro_start.cpp
+@@ -7,16 +7,88 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ */
+ #include "intro/intro_start.h"
+ 
++#include "core/application.h"
++#include "core/core_settings.h"
++#include "intro/intro_widget.h"
++#include "lang/lang_hardcoded.h"
+ #include "lang/lang_keys.h"
+ #include "intro/intro_qr.h"
+ #include "intro/intro_phone.h"
++#include "main/main_domain.h"
++#include "settings/cloud_password/settings_cloud_password_common.h"
++#include "storage/storage_domain.h"
++#include "ui/layers/generic_box.h"
+ #include "ui/widgets/buttons.h"
++#include "ui/widgets/fields/password_input.h"
+ #include "ui/widgets/labels.h"
+ #include "main/main_account.h"
+ #include "main/main_app_config.h"
++#include "window/window_controller.h"
++
++#include <openssl/crypto.h>
+ 
+ namespace Intro {
+ namespace details {
++namespace {
++
++constexpr auto kPasscodeOfferShown = "hooktelegram.passcodeOfferShown";
++
++void FirstLaunchPasscodeBox(not_null<Ui::GenericBox*> box) {
++	using namespace Settings::CloudPassword;
++	box->setWidth(st::boxWideWidth);
++	const auto fields = SetupPasswordFields(box->verticalLayout(), {
++		.lottie = u"local_passcode_enter"_q,
++		.title = tr::lng_passcode_create_title(),
++		.about = tr::lng_passcode_about(),
++		.placeholder = tr::lng_passcode_enter_new(),
++	});
++	const auto busy = box->lifetime().make_state<bool>(false);
++	const auto submit = [=] {
++		if (*busy) {
++			return;
++		}
++		const auto password = ValidatePasswordFields(fields);
++		if (!password) {
++			return;
++		}
++		auto &local = Core::App().domain().local();
++		if (local.hasPasscode()) {
++			box->closeBox();
++			return;
++		}
++		*busy = true;
++		fields.input->setDisabled(true);
++		fields.confirm->setDisabled(true);
++		auto utf8 = password->toUtf8();
++		auto job = local.prepareNewWrap(utf8);
++		OPENSSL_cleanse(utf8.data(), utf8.size());
++		Storage::DeriveOnWorker(
++			std::move(job),
++			crl::guard(box, [=](Storage::PasscodeDerivation &&derived) {
++				auto &app = Core::App();
++				const auto result = app.domain().local().setPasscode(
++					std::move(derived),
++					Storage::PasscodeVerification());
++				if (result == Storage::SetPasscodeResult::Success) {
++					box->closeBox();
++					app.localPasscodeChanged();
++					return;
++				}
++				*busy = false;
++				fields.input->setDisabled(false);
++				fields.confirm->setDisabled(false);
++				fields.error->setText(Lang::Hard::SecureSaveError());
++				fields.error->show();
++				FocusPasswordFields(fields);
++			}));
++	};
++	SubmitPasswordFields(fields, submit);
++	box->addButton(tr::lng_passcode_create_button(), submit);
++	box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
++	box->setFocusCallback([=] { FocusPasswordFields(fields); });
++}
++
++} // namespace
+ 
+ StartWidget::StartWidget(
+ 	QWidget *parent,
+@@ -24,8 +96,8 @@ StartWidget::StartWidget(
+ 	not_null<Data*> data)
+ : Step(parent, account, data, true) {
+ 	setMouseTracking(true);
+-	setTitleText(rpl::single(u"Telegram Desktop"_q));
+-	setDescriptionText(tr::lng_intro_about());
++	setTitleText(rpl::single(u"HookTelegram"_q));
++	setDescriptionText(tr::lng_hooktelegram_intro_about());
+ 	show();
+ }
+ 
+@@ -45,6 +117,17 @@ rpl::producer<> StartWidget::nextButtonFocusRequests() const {
+ void StartWidget::activate() {
+ 	Step::activate();
+ 	setInnerFocus();
++	crl::on_main(this, [=] {
++		auto &app = Core::App();
++		if (isHidden()
++			|| app.passcodeLocked()
++			|| app.domain().local().hasPasscode()
++			|| app.settings().readPref<bool>(kPasscodeOfferShown)) {
++			return;
++		}
++		app.settings().writePref<bool>(kPasscodeOfferShown, true);
++		getData()->controller->show(Box(FirstLaunchPasscodeBox));
++	});
+ }
+ 
+ void StartWidget::setInnerFocus() {
