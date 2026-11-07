@@ -292,10 +292,10 @@ index 959f453..890fa40 100644
  		font: font(boxFontSize semibold);
  	}
 diff --git a/Telegram/SourceFiles/intro/intro_start.cpp b/Telegram/SourceFiles/intro/intro_start.cpp
-index d1b835a..8830a35 100644
+index d1b835a..6a54549 100644
 --- a/Telegram/SourceFiles/intro/intro_start.cpp
 +++ b/Telegram/SourceFiles/intro/intro_start.cpp
-@@ -7,16 +7,88 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+@@ -7,16 +7,90 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
  */
  #include "intro/intro_start.h"
  
@@ -316,6 +316,8 @@ index d1b835a..8830a35 100644
  #include "main/main_account.h"
  #include "main/main_app_config.h"
 +#include "window/window_controller.h"
++
++#include "styles/style_layers.h"
 +
 +#include <openssl/crypto.h>
  
@@ -384,7 +386,7 @@ index d1b835a..8830a35 100644
  
  StartWidget::StartWidget(
  	QWidget *parent,
-@@ -24,8 +96,8 @@ StartWidget::StartWidget(
+@@ -24,8 +98,8 @@ StartWidget::StartWidget(
  	not_null<Data*> data)
  : Step(parent, account, data, true) {
  	setMouseTracking(true);
@@ -395,7 +397,7 @@ index d1b835a..8830a35 100644
  	show();
  }
  
-@@ -45,6 +117,17 @@ rpl::producer<> StartWidget::nextButtonFocusRequests() const {
+@@ -45,6 +119,17 @@ rpl::producer<> StartWidget::nextButtonFocusRequests() const {
  void StartWidget::activate() {
  	Step::activate();
  	setInnerFocus();

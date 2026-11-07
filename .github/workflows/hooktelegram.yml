@@ -35,13 +35,41 @@ jobs:
           sdk: 10.0.26100.0
           toolset: '14.44'
 
+      - name: Restore build tools
+        id: thirdparty-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ThirdParty
+          key: hooktelegram-win64-thirdparty-v1
+
+      - name: Restore libraries
+        id: libraries-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: Libraries/win64
+          key: hooktelegram-win64-libraries-v1
+
       - name: Prepare libraries
         shell: cmd
         run: |
-          mkdir Libraries
-          mkdir ThirdParty
+          if not exist Libraries mkdir Libraries
+          if not exist ThirdParty mkdir ThirdParty
           call tdesktop\Telegram\build\prepare\win.bat skip-release silent qt6
           if errorlevel 1 exit /b 1
+
+      - name: Save build tools
+        if: steps.thirdparty-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ThirdParty
+          key: hooktelegram-win64-thirdparty-v1
+
+      - name: Save libraries
+        if: steps.libraries-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: Libraries/win64
+          key: hooktelegram-win64-libraries-v1
 
       - name: Configure and build
         shell: cmd
