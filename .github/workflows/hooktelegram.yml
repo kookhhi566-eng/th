@@ -36,7 +36,7 @@ jobs:
 
       - name: Apply HookTelegram changes
         shell: cmd
-        run: git -C tdesktop apply ../control/changes.patch
+        run: git -C control cat-file blob HEAD:changes.patch | git -C tdesktop apply -
 
       - uses: actions/setup-python@v6
         with:
